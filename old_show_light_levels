@@ -1,0 +1,472 @@
+#!/opt/gums/bin/perl
+
+use strict;
+use warnings;
+use File::Temp qw/ tempfile /;
+use POSIX 'log10';
+
+use vars qw($me $RTRCFG_BASE);
+use vars qw($result $dbname $dbhost $dbport $dbuser $dbpwd $debug $debugl $excludeterm $includeterm $header);
+use vars qw($CLOGIN $JLOGIN $CLOGINRC $LOG $dbh $rtrs %descr);
+BEGIN {
+$me = $0;
+$me =~ s/.*\/(\S+)$/$1/;
+
+# Add path to libraries and include the neccessary ones
+$RTRCFG_BASE = defined($ENV{'RTRCFG_BASE'}) ? $ENV{'RTRCFG_BASE'} : "$ENV{HOME}/config";
+
+push(@INC, "$RTRCFG_BASE/tools/lib");
+
+use LockFile::Simple qw(lock trylock unlock);
+}
+
+# process command line options
+use vars qw/$opt_h $opt_H $opt_d $opt_D $opt_A $opt_P $opt_m $opt_f $opt_q $opt_r $opt_U $opt_E $opt_I $opt_L/;
+use Getopt::Long;
+Getopt::Long::Configure('auto_abbrev', 'no_ignore_case');
+$result = GetOptions('h','H=s','d:i','D=s','A=s','P=i','m=s','f','q','r=s','U','E=s','I=s','L');  
+&usage($result) if (defined($opt_h) || $result == 0);
+$dbname = (defined $opt_D) ? $opt_D : "cfgtools";
+$dbhost = (defined $opt_H) ? $opt_H : undef;
+$dbport = (defined $opt_P) ? $opt_P : undef;
+($dbuser,$dbpwd) = (defined $opt_A) ? split(/\//,$opt_A) : ("","");
+$debug = (defined($opt_d)) ? (($opt_d > 0) ? $opt_d : 1) : 0;
+$excludeterm = (defined $opt_E) ? $opt_E : "unused";
+$includeterm = (defined $opt_I) ? $opt_I : "unused";
+$header = (defined($opt_L)) ? 0 : 1;
+# cloginrc file
+$CLOGINRC = defined($opt_r) ? $opt_r : (defined($ENV{'CLOGINRC'}) ?
+        $ENV{'CLOGINRC'} : (-e "$ENV{HOME}/.cloginrc" ?
+        "$ENV{HOME}/.cloginrc" : "$RTRCFG_BASE/.cloginrc"));
+
+
+# for debug formatting
+$debugl = 0;
+
+$CLOGIN = "/opt/gums/bin/clogin";
+$JLOGIN = "/opt/gums/bin/jlogin";
+
+printf(STDERR "$me: RTRCFG_BASE = $RTRCFG_BASE\n") if ($debug);
+
+# check for database driver name or set default for &dbinit()
+#$ENV{DBI_DSN} = "dbi" if (! defined($ENV{'DBI_DSN'}));
+#printf(STDERR "$me: ENV{DBI_DSN} (default DBI) = $ENV{DBI_DSN}\n")
+#                                                                if ($debug);
+$ENV{DBI_DRIVER} = "Pg" if (! defined($ENV{'DBI_DRIVER'}));
+printf(STDERR "$me: ENV{DBI_DRIVER} (default DBD) = $ENV{DBI_DRIVER}\n")
+                                                                if ($debug);
+
+# override default mailers
+$ENV{PERL_MAILERS} = "/usr/lib/sendmail:/usr/bin/sendmail:/usr/sbin/sendmail:mailx:Mail:mail";
+$ENV{PATH} = "/opt/gums/bin:" . $ENV{PATH} . ":/usr/local/bin";
+
+use sigtrap;
+require 'db.pl';
+use Mail::Send;
+use routers;
+use Net::IP qw(:PROC);
+use SNMP; $SNMP::auto_init_mib = 0;
+
+$|=1;  # disable stdout buffering
+umask(077);
+
+# clean up on signal
+use sigtrap 'handler' => \&trap, 'normal-signals';
+use sigtrap 'handler' => \&trap, 'error-signals';
+
+if ($opt_m) {
+    my $TMPDIR = defined($ENV{'TMPDIR'}) ? $ENV{'TMPDIR'} : "/tmp";
+    my $C = $$;
+    $LOG = "$TMPDIR/$me.$C";
+    while (-e $LOG) {
+        $C ++;
+        $LOG = "$TMPDIR/$me.$C";
+    }
+    open(LOG, "> $LOG") || die "$me: failed to open log file $LOG: $!";
+    select(LOG);
+    $|=1;
+    *STDERR = *LOG;
+    print "$TMPDIR/$me.$$ already exists??\n" if ($C != $$);
+}
+
+# seed db vars from ENV
+&dbenvvar();
+
+# connect to the database 
+$dbh = &dbinit($dbname, $dbuser, $dbpwd, $dbhost, $dbport);
+
+# fill router hash
+$rtrs = &get_rtrs_byname(undef, $dbh, $debug, $debugl);
+if (! defined($rtrs)) {
+    die "failed to import routers table.";
+}
+if ($#ARGV < 1) {
+  print "Missing arguements\n\n";
+  &usage(1);
+}
+
+my $rtr = $ARGV[0];
+shift(@ARGV);
+my $ifc_name = $ARGV[0];
+shift(@ARGV);
+if (!defined($$rtrs{$rtr})) {
+   printf "Invalid router: '$rtr'\n\n";
+   &usage(2);
+}
+if (($$rtrs{$rtr}->{os_name} !~ m/(iox|junos)/)) {
+   printf "Invalid router mfg for '$rtr', expected iox or junos, got $$rtrs{$rtr}->{os_name}\n\n";
+   &usage(3);
+}
+my @ifc=&get_all_interfaces($rtr,$ifc_name);
+if ($#ifc < 0) {
+   print "No matching ifc for router '$rtr' interface '$ifc_name'\n";
+   exit 0;
+}
+&get_light_levels($rtr, @ifc);
+
+# mail the log, if a recipient was specified
+if ($opt_m) {
+    select(STDOUT);
+    close(LOG);
+
+    # only send mail if there is information to send
+    if (-s $LOG) {
+        my($msg) = new Mail::Send;
+        $msg->to($opt_m);
+        $msg->subject("$me output");
+        $msg->set("Precedence", ("bulk"));
+        my($mailer) = $msg->open;
+
+        open(LOG, "< $LOG") || die "failed to open $LOG for mailing: $!";
+        while (<LOG>) {
+            print $mailer $_;
+        }
+        close(LOG);
+
+        $mailer->close;
+        }
+        # always unlink
+        unlink($LOG);
+}
+exit 0;
+
+sub convert_cisco_light {
+    my($in) = shift;
+
+    if ($in =~ m# (\d+) uW#) {
+       my($v)=$1;
+       $in =~ s/ $v uW/  0.$v mW/;
+       my $dbm = sprintf("%.5f", 10*log10("0.$v"));
+       $in .= " ($dbm dBm)";
+    }
+    return($in);
+}
+
+sub convert_juniper_light {
+    my($in) = shift;
+
+    # in
+    #  0.6720 mW / -1.73 dBm
+    # out
+    #  0.674 mW (-1.72 dBm)
+
+    $in =~ s#/ +#(#;
+    $in =~ s/$/)/;
+    return($in);
+}
+
+sub get_light_levels {
+    my ($rtr,@IFC)=@_;
+    my ($ifc, $list, @logs, $line);
+    my $XLOGIN = ($$rtrs{$rtr}->{os_name} eq "iox" ? $CLOGIN : $JLOGIN);
+    my $command_begin = "";
+    my $command_end = "";
+    my $command="";
+    if ($$rtrs{$rtr}->{os_name} eq "junos") {
+        $command_begin = "show interfaces diagnostics optics";
+        $command_end = q##;
+    }
+    foreach $ifc (@IFC) {
+        $command .= sprintf("%s %s %s;",$command_begin,$ifc,$command_end);
+    }
+    chop($command) if $command ne ""; # kill trailing ;
+    if ($$rtrs{$rtr}->{os_name} eq "iox") {
+    # detect if device is exr
+    my $is_exr = 0;
+    if ($$rtrs{$rtr}->{os_rev} =~ m/^6/) {
+       $is_exr = 1;
+    }
+    my ($fh, $filename) = tempfile("$me.XXXXX", DIR => '/tmp', UNLINK => ($debug == 0 ? 1 : 0));
+printf $fh <<EOM;
+log_user 1
+set timeout 15
+proc show_cont { ifc_name if_hund if_10x10 if_satellite is_exr} {
+    log_user 0
+    if {\$if_hund} {
+       set pipe "include \\"(        \\[0-3\\].*mW |Lane * Temp)\\""
+    } elseif {\$if_10x10} {
+       set pipe "inc \\"x P|N/A\\""
+    } elseif {\$if_satellite} { 
+       set pipe "inc x P"
+       if {\$is_exr } {
+         set pipe "inc x p"
+       }
+    } else {
+       set pipe "inc power"
+    }
+    send "show controller \$ifc_name phy | \$pipe\\r";
+    expect {
+         "ERROR: Invalid port number or no transceiver inserted" { send_user -- "\$expect_out(buffer)\\n"
+ exp_continue}
+         "\\#\$" {send_user -- "\$expect_out(buffer)" } 
+    }
+}
+
+send "\\r"
+expect {
+        timeout         { send_error "Error: did not receive prompt\\n"
+                          exit }
+        -re "^\\[^ ]*\\#" { send "term length 20\\r" }
+}
+expect "\\#"
+send "term width 132\\r"
+expect "\\#"
+EOM
+my $ifc_name;
+foreach $ifc_name (split(/;/, $command)) {
+   $ifc_name =~ s/ //g;
+   my $is_hund = 0;
+   my $is_10x10 = 0;
+   my $is_satellite = 0;
+   if ($ifc_name =~ m/^Hu|hundredGigE/) {
+      $is_hund = 1;
+   }
+   my @count = ($ifc_name =~ /\//g); # count / in interface name
+   if (@count > 3) {
+      $is_10x10 = 1;
+   }
+   if ($ifc_name =~ m/^Gi10/) {
+      $is_satellite = 1;
+   }
+   printf $fh <<EOM
+show_cont "$ifc_name" $is_hund $is_10x10 $is_satellite $is_exr
+EOM
+}
+printf $fh <<EOM;
+send "quit\\r"
+expect {
+        timeout         { send_error "Error: timeout waiting for EOF after quit\\n"}
+        eof     { exit 0 }
+}
+EOM
+close($fh);
+$command = $filename;
+    }
+    my $fqdn = $$rtrs{$rtr}->{device_name} .".". $$rtrs{$rtr}->{domainname};
+    &cmd($XLOGIN, $CLOGINRC, $command, ${fqdn}, \@logs);
+    foreach $line (@logs) {
+        chomp($line);
+        $line =~ s///g;
+        chomp($line);
+        warn("Looking at line: '$line'\n") if ($debug);
+        if ($$rtrs{$rtr}->{os_name} eq "junos") {
+            if ($line =~ m/Lane /) {
+               print "$line\n" if ($header);
+               next;
+            }
+            next if $line !~ /(Physical|power  )/;
+            if ($1 eq "Physical") {
+               my @t=split(/:/,$line, 2);
+               $t[1] =~ s# ##g;
+               my $desc = (defined($descr{$t[1]}) ? $descr{$t[1]} : "not set");
+               $line = sprintf("%s %s %s", $rtr, $t[1], $desc);
+            } else {
+               $line =~ s/ +/ /g;
+               my @t = split(/:/, $line);
+               my $light_fixed = &convert_juniper_light($t[1]);
+               $t[0] =~ s/Laser output p/Tx P/;
+               $t[0] =~ s/Receiver signal average optical p/Rx P/;
+               $t[0] =~ s/Laser receiver p/Rx P/;
+               $t[0] =~ s/ $//g;
+               $line = sprintf("    %s: %s", $t[0], $light_fixed);
+            }
+            print $line."\n";
+        } else {
+            if ($line =~ m/Lane.*Power/) {
+               print "$line\n" if ($header);
+               next;
+            }
+            next if $line !~ /(controller|x P|x p|Power|ERROR|mAmps)/;
+            # fix exr satellite ports not having indention case/spacing
+            if ($line =~ m/^(Tx power|Rx power)/) {
+                   $line = "\t\t$line";
+                   $line =~ s/x power: /x Power:  /;
+            }
+            if ($line =~ m/ERROR/) {
+                   $line =~ s/ERROR: Invalid port number or /        /;
+                   print "$line\n";
+                   next;
+            }
+            if ($line =~ /controller/) {
+                my @line = split(/[ :#]/,$line);
+                # 0 RP/0/RSP0/CPU0
+                # 1 router
+                # 2 show
+                # 3 controllers
+                # 4 ifc
+                my $desc = (defined($descr{$line[4]}) ? $descr{$line[4]} : "not set");
+                $line = sprintf("%s %s %s", $line[1], $line[4], $desc);
+            }
+            $line = &convert_cisco_light($line);
+            print $line."\n";
+        }
+    }
+}
+
+sub get_all_interfaces {
+    my ($rtr,$ifc)=@_;
+    my ($line,$command,@result,@logs);
+    $command = "show interfaces descriptions";
+    if (defined($opt_E) || defined($opt_U)) {
+        $command .= " | e ".$excludeterm;
+    } 
+    if (defined($opt_I)) {
+        $command .= " | match ".$includeterm;
+    }
+    my $sifc = $ifc;
+    my $XLOGIN = $JLOGIN;
+    if ($$rtrs{$rtr}->{os_name} eq "iox") {
+        # no 's' on description
+        $command = "show interfaces description";
+        if (defined($opt_E) || defined($opt_U)) {
+            $command .= " | e ".$excludeterm;
+        }   
+        if (defined($opt_I)) {
+            $command .= " | i ".$includeterm;
+        }   
+
+        $sifc =~ s/^[a-zA-Z]+(\d)/(Te|Gi|Hu)$1/;
+        $XLOGIN = $CLOGIN;
+    } else { # juniper
+        $sifc =~ s/^[a-zA-Z]+(-\d)/(xe|ge|so|et)$1/;
+    }
+
+    my $fqdn = $$rtrs{$rtr}->{device_name} .".". $$rtrs{$rtr}->{domainname};
+    &cmd($XLOGIN, $CLOGINRC, $command, ${fqdn}, \@logs);
+    foreach $line (grep(m#$sifc#,@logs)) {
+        chomp($line);
+        chop($line) if $line =~ /$/;
+        chop($line) if $line =~ /$/;
+        chomp($line);
+        $line =~ s/^[ \t]+//;
+        # strip leading carriage return if present
+        if ($line =~ m#^#) {
+            $line =~ s#^##g;
+        }
+        # XXX do we need to track or ignore certain states?
+        # convert shortname to long name to make 5.3.4 happy 
+        if ($$rtrs{$rtr}->{os_rev} eq '5.3.4') { 
+          $line =~ s/^Te0/tenGigE0/g; 
+          $line =~ s/^Hu0/hundredGigE0/g; 
+        } 
+        my @line = split(/[ \t]+/, $line, 4);
+        next if $line[0] !~ m#^(tenGigE|hundredGigE|Te|Gi|Hu|xe|so|ge|et)# || $line[0] =~ m#\.#;
+        push(@result,$line[0]);
+        $descr{$line[0]} = $line[3];
+    }
+    return(@result);
+}
+
+
+##
+#  Subroutine:  cmd
+#       Usage:  &cmdc($login_prog, $pwdfile, $script, $rtr, \@logs);
+# Description:  runs login_prog w/ $script (or a cmd) on $rtr
+##
+sub cmd {
+    my($login_prog, $pwdfile, $script, $rtr, $logs) = @_;
+    my($ecode) = 0;
+    my($pwd, $cpid, $cmd);
+    local(*CMD);
+
+    if (! defined($login_prog)) {
+        $login_prog = "clogin";
+    }
+    if (! defined($script)) {
+        push(@$logs, "ERROR: login script not defined.\n");
+        return(1);
+    }
+    if (defined($pwdfile)) {
+        $cmd = "$login_prog -f $pwdfile";
+    } else {
+        $cmd = $login_prog;
+    }
+    if ($script !~ /\s/) {
+        $cmd .= " -s $script";
+    } else {
+        $cmd .= " -c \'$script\'";
+    }
+
+    warn("$cmd $rtr\n") if ($debug);
+    ($cpid = open (CMD, "sh -c \"$cmd $rtr\" 2>&1 |")) ||
+                                        die "Can't run $login_prog: $!\n";
+
+    while (<CMD>) {
+        push(@$logs, $_);
+    }
+
+    waitpid($cpid, 0);
+    $ecode = $? >> 8;
+    close(CMD);
+
+    return($ecode);
+}
+
+
+##
+#  Subroutine:        trap
+#       Usage:        &trap([$ecode]);
+# Description:        cleans up db stuff.
+##
+sub trap {
+    my($ecode) = @_;
+
+    &dbdisc($dbh) if (defined($dbh));
+    $ecode = -1 if (! defined($ecode));
+    unlink($LOG) if (defined($LOG) && -f $LOG);
+
+    exit($ecode);
+}
+
+##
+#  Subroutine:        usage
+#       Usage:        &usage();
+# Description:        prints out a usage/how-to msg and exits
+##
+sub usage
+{
+  my($res) = shift;
+  if (!defined($res)) {
+    $res=0;
+  }
+ print STDERR <<USAGE;
+usage: $me [-h] [-d] [-D db_name] [-H db_host] [-P port] [-A db_user/db_password] [-m <mail rcpt>] [-r <.cloginrc>] router (ifc_name | slot_name ) [-I include] [-U | -E exclude] [-L]
+       -d prints useful debugging
+       -h prints this message
+       -D specifies the database name, defaults to cfgtools
+       -H database hostname
+       -P database port number
+       -A database authentication username/password
+       -m recipient of output
+       -r .cloginrc file or env(CLOGINRC) or HOME/.cloginrc [dflt: RTRCFG_BASE/.cloginrc]
+       -U skip unused interfaces
+       -E exclude lines that match
+       -I include lines that match
+       -L exclude Lane header lines
+       router eg routers.name
+       ifc_name ifc_name (use '/' for everything)
+       slot_name ifc_name minus last digit(s), ex te0/ or te0/1/0/
+USAGE
+ exit $res;
+}
+

@@ -1,0 +1,304 @@
+#!/opt/gums/bin/bash
+set -e
+cd
+
+PSQL=`type -p psql`
+SED=/bin/sed
+ECHO=/bin/echo
+
+if [ -z $1 ]; then
+   echo ""
+   echo "      shutdown_traffic [version 2.4]"
+   echo ""
+   echo "Usage: shutdown_traffic <router> <fpc/slot> <pic>"
+   echo "   ex."
+   echo "      Cisco   >./shutdown_traffic r00.tokyjp04.jp.bb 3"
+   echo "      Juniper >./shutdown_traffic r30.tokyjp05.jp.bb 5 1"
+   echo ""
+   echo ""
+   exit 1
+fi
+
+# OS version check
+TYPE=`$PSQL -A -t -c "SELECT os_name FROM ct_devices JOIN ct_os_name ON (ct_devices.os_name_id=ct_os_name.os_name_id) WHERE device_name='$1'" cfgtools`
+
+
+if [ $TYPE == "iox" ]; then	## IOS-XR
+
+    if [ ! -z $2 ]; then
+      if [ ! -z $3 ]; then
+        echo "This router is IOS-XR!! PIC parameter will be ignored"
+      else
+        CARD=`$ECHO "e0/$2\/"`
+        FILE=$1.slot$2.traffic
+        echo "Retrieving information for $1 - slot-$2"
+      fi
+    else
+      FILE=$1.all-slot.traffic
+      echo "Retrieving information for $1 (all slot)"
+    fi
+
+
+  elif [ $TYPE == "junos" ]; then   ### JUNOS
+
+    if [ ! -z $2 ]; then
+      if [ ! -z $3 ]; then
+        CARD=`$ECHO -$2\/$3\/`
+        FILE=$1.slot$2.pic$3.traffic
+        echo "Retrieving information for $1 - slot-$2.pic-$3"
+      else
+        CARD=`$ECHO -$2\/`
+        FILE=$1.slot$2.traffic
+        echo "Retrieving information for $1 - slot-$2"
+      fi
+    else
+      FILE=$1.all-slot.traffic
+      echo "Retrieving information for $1 (all slot)"
+    fi
+
+  else   ### Other OS
+    echo "This script can only run on Cisco IOS-XR & JUNOS devices."
+    exit 0
+  fi
+###
+### Begin BGP
+###
+SUBAS=`$PSQL -A -t -c "SELECT subas FROM ct_devices d JOIN ct_routers r ON (r.device_id = d.device_id) WHERE device_name='$1'" cfgtools`
+
+if [ -z "$SUBAS" ]; then
+   echo "$1 does not support bgp."
+else
+   if [ ! -z $2 ]; then
+      BGPQUERY="SELECT ip_addr FROM ct_peers JOIN ct_ifcs i on i.ifc_id = ct_peers.ifc_id JOIN ct_devices ON (ct_devices.device_id=i.device_id) \
+                JOIN ct_ifcs ON (ct_ifcs.device_id=ct_devices.device_id) \
+                LEFT JOIN ct_proto_ipv4 ON (ct_proto_ipv4.ifc_id=ct_ifcs.ifc_id) \
+                LEFT JOIN ct_proto_ipv6 ON (ct_proto_ipv6.ifc_id=ct_ifcs.ifc_id) \
+                WHERE device_name='$1' AND i.ifc_name like '%$CARD%' AND (ip_addr << network(ipv4) OR ip_addr << network(ipv6)) \
+                ORDER BY ip_addr" 
+   else
+      BGPQUERY="SELECT ip_addr FROM ct_peers JOIN ct_ifcs i on i.ifc_id = ct_peers.ifc_id JOIN ct_devices ON (ct_devices.device_id=i.device_id) WHERE device_name='$1' ORDER BY ip_addr" 
+   fi
+fi
+###
+### End BGP
+###
+
+###
+### Begin Static Routes
+###
+if [ ! -z $2 ]; then
+   STATICSQUERY4C="SELECT prefix, ifc_name, nexthop_ip FROM ct_statics \
+                 JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+                 JOIN ct_ifcs ON (ct_ifcs.device_id=ct_devices.device_id) \
+                 JOIN ct_proto_ipv4 ON (ct_proto_ipv4.ifc_id=ct_ifcs.ifc_id) \
+                 WHERE device_name='$1' AND ifc_name LIKE '%$CARD%' \
+                 AND family(prefix) = 4 \
+                 AND ( ct_statics.nexthop_ifc_id=ct_ifcs.ifc_id OR nexthop_ip <<= network(ipv4) ) ORDER BY prefix"
+   STATICSQUERY6C="SELECT prefix, ifc_name, nexthop_ip FROM ct_statics \
+                 JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+                 JOIN ct_ifcs ON (ct_ifcs.device_id=ct_devices.device_id) \
+                 JOIN ct_proto_ipv6 ON (ct_proto_ipv6.ifc_id=ct_ifcs.ifc_id) \
+                 WHERE device_name='$1' AND ifc_name LIKE '%$CARD%' \
+                 AND family(prefix) = 6 \
+                 AND ( ct_statics.nexthop_ifc_id=ct_ifcs.ifc_id OR nexthop_ip <<= network(ipv6) ) ORDER BY prefix"
+   STATICSQUERY4J="SELECT prefix FROM ct_statics \
+                 JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+                 JOIN ct_ifcs ON (ct_ifcs.device_id=ct_devices.device_id) \
+                 JOIN ct_proto_ipv4 ON (ct_proto_ipv4.ifc_id=ct_ifcs.ifc_id) \
+                 WHERE device_name='$1' AND ifc_name LIKE '%$CARD%' \
+                 AND family(prefix) = 4 \
+                 AND ( ct_statics.nexthop_ifc_id=ct_ifcs.ifc_id OR nexthop_ip <<= network(ipv4) ) ORDER BY prefix"
+   STATICSQUERY6J="SELECT prefix FROM ct_statics \
+                 JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+                 JOIN ct_ifcs ON (ct_ifcs.device_id=ct_devices.device_id) \
+                 JOIN ct_proto_ipv6 ON (ct_proto_ipv6.ifc_id=ct_ifcs.ifc_id) \
+                 WHERE device_name='$1' AND ifc_name LIKE '%$CARD%' \
+                 AND family(prefix) = 6 \
+                 AND ( ct_statics.nexthop_ifc_id=ct_ifcs.ifc_id OR nexthop_ip <<= network(ipv6) ) ORDER BY prefix"
+else
+#   STATICSQUERY4C="SELECT prefix, ifc_name, nexthop_ip FROM ct_statics \
+#                 JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+#                 JOIN ct_ifcs ON (ct_ifcs.device_id=ct_devices.device_id) \
+#                 JOIN ct_proto_ipv4 ON (ct_proto_ipv4.ifc_id=ct_ifcs.ifc_id) \
+#                 WHERE device_name='$1' AND family(prefix) = 4 \
+#                 AND ( ct_statics.nexthop_ifc_id=ct_ifcs.ifc_id OR nexthop_ip <<= network(ipv4) ) ORDER BY prefix"
+#   STATICSQUERY6C="SELECT prefix, ifc_name, nexthop_ip FROM ct_statics \
+#                 JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+#                 JOIN ct_ifcs ON (ct_ifcs.device_id=ct_devices.device_id) \
+#                 JOIN ct_proto_ipv6 ON (ct_proto_ipv6.ifc_id=ct_ifcs.ifc_id) \
+#                 WHERE device_name='$1' AND family(prefix) = 6 \
+#                 AND ( ct_statics.nexthop_ifc_id=ct_ifcs.ifc_id OR nexthop_ip <<= network(ipv6) ) ORDER BY prefix"
+#   STATICSQUERY4J="SELECT prefix FROM ct_statics \
+#                 JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+#                 JOIN ct_ifcs ON (ct_ifcs.device_id=ct_devices.device_id) \
+#                 JOIN ct_proto_ipv4 ON (ct_proto_ipv4.ifc_id=ct_ifcs.ifc_id) \
+#                 WHERE device_name='$1' AND family(prefix) = 4 \
+#                 AND ( ct_statics.nexthop_ifc_id=ct_ifcs.ifc_id OR nexthop_ip <<= network(ipv4) ) ORDER BY prefix"
+#   STATICSQUERY6J="SELECT prefix FROM ct_statics \
+#                 JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+#                 JOIN ct_ifcs ON (ct_ifcs.device_id=ct_devices.device_id) \
+#                 JOIN ct_proto_ipv6 ON (ct_proto_ipv6.ifc_id=ct_ifcs.ifc_id) \
+#                 WHERE device_name='$1' AND family(prefix) = 6 \
+#                 AND ( ct_statics.nexthop_ifc_id=ct_ifcs.ifc_id OR nexthop_ip <<= network(ipv6) ) ORDER BY prefix"
+   STATICSQUERY4C="SELECT prefix, nexthop_ip FROM ct_statics \
+                  JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+                  WHERE device_name='$1' AND family(prefix)=4";
+   STATICSQUERY6C="SELECT prefix, nexthop_ip FROM ct_statics \
+                  JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+                  WHERE device_name='$1' AND family(prefix)=6";
+   STATICSQUERY4J="SELECT prefix FROM ct_statics \
+                  JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+                  WHERE device_name='$1' AND family(prefix)=4";
+   STATICSQUERY6J="SELECT prefix FROM ct_statics \
+                  JOIN ct_devices ON (ct_devices.device_id=ct_statics.device_id) \
+                  WHERE device_name='$1' AND family(prefix)=6";
+fi
+
+###
+### End Static Routes
+###
+
+###
+### Begin l2vpn
+###
+if [ ! -z $2 ]; then
+   L2VPNQUERY="SELECT ifc_name FROM ct_l2vpnu \
+               JOIN ct_ifcs ON (ct_ifcs.ifc_id=ct_l2vpnu.ifc_id) \
+               JOIN ct_devices ON (ct_devices.device_id=ct_ifcs.device_id) \
+               WHERE device_name='$1' AND ifc_name LIKE '%$CARD%' ORDER BY ifc_name"
+else
+   L2VPNQUERY="SELECT ifc_name FROM ct_l2vpnu \
+               JOIN ct_ifcs ON (ct_ifcs.ifc_id=ct_l2vpnu.ifc_id) \
+               JOIN ct_devices ON (ct_devices.device_id=ct_ifcs.device_id) \
+               WHERE device_name='$1' ORDER BY ifc_name"
+fi
+
+###
+### End l2vpn
+###
+
+###
+### Start Bundle Interfaces
+###
+if [ ! -z $2 ]; then
+   BUNDLESQUERY="SELECT ifc_name FROM ct_proto_proto_agg \
+                 JOIN ct_ifcs ON (ct_ifcs.ifc_id=ct_proto_proto_agg.ifc_id) \
+                 JOIN ct_devices ON (ct_devices.device_id=ct_ifcs.device_id) \
+                 WHERE device_name='$1' AND ifc_name LIKE '%$CARD%' ORDER BY ifc_name"
+fi
+
+###
+### End Bundle Interfaces
+###
+
+###
+### WRITE CONFIGURATION #######
+### for IOS-XR
+
+if [ $TYPE == "iox" ]; then   ### IOS-XR
+
+echo "conf t" > $FILE
+
+### BGP
+for ip in `$PSQL -A -t -c "$BGPQUERY" cfgtools`
+do
+   echo -n "."
+   echo "router bgp $SUBAS neighbor $ip shutdown" >> $FILE
+done
+
+### STATIC
+for prefix in `$PSQL -A -t -c "$STATICSQUERY4C" cfgtools`
+do
+   echo -n "."
+   echo "no router static address-family ipv4 unicast $prefix" | $SED -e 's/|/ /g' >> $FILE
+done
+
+for prefix in `$PSQL -A -t -c "$STATICSQUERY6C" cfgtools`
+do
+   echo -n "."
+   echo "no router static address-family ipv6 unicast $prefix" | $SED -e 's/|/ /g' >> $FILE
+done
+
+
+### L2VPN
+for interface in `$PSQL -A -t -c "$L2VPNQUERY" cfgtools`
+do
+   echo -n "."
+   echo "interface $interface shutdown" >> $FILE
+done
+
+
+### Bundle member
+for interface in `$PSQL -A -t -c "$BUNDLESQUERY" cfgtools`
+do
+   echo -n "."
+   echo "no interface $interface bundle id" >> $FILE
+done
+
+echo "root" >> $FILE
+echo "show" >> $FILE
+echo "commit" >> $FILE
+echo "end" >> $FILE
+
+###
+### WRITE CONFIGURATION #######
+### for JUNOS
+
+elif [ $TYPE == "junos" ]; then   ### JUNOS
+
+#echo "This router is Juniper. It will takes few minites for makeing command..."
+echo "edit" > $FILE
+
+### BGP
+for ip in `$PSQL -A -t -c "$BGPQUERY" cfgtools`
+do
+   echo -n "."
+   group=`jlogin -c "show configuration protocols bgp | display set | match $ip " $1 | grep $ip | grep -v $1 | awk '{print $5}' | head -1`
+   if [ -z $group ]; then
+      echo -e "   Could not find $ip in configuration of this router. \e[31mPlease shutdown $ip manually!!\e[m"
+   else
+      echo "set protocols bgp group $group neighbor $ip inactivate" >> $FILE
+   fi
+done
+
+### STATIC
+for prefix in `$PSQL -A -t -c "$STATICSQUERY4J" cfgtools`
+do
+   echo -n "."
+   echo "delete routing-options rib inet.2 static route $prefix" >> $FILE
+done
+
+for prefix in `$PSQL -A -t -c "$STATICSQUERY6J" cfgtools`
+do
+   echo -n "."
+   echo "delete routing-options rib inet.2 static route $prefix" >> $FILE
+done
+
+
+### L2VPN
+for interface in `$PSQL -A -t -c "$L2VPNQUERY" cfgtools`
+do
+   echo -n "."
+   echo "set interface $interface disable" >> $FILE
+done
+
+
+### Bundle member
+for interface in `$PSQL -A -t -c "$BUNDLESQUERY" cfgtools`
+do
+   echo -n "."
+   echo "delete interfaces $interface gigether-options 802.3ad" >> $FILE
+done
+
+echo "show | compare" >> $FILE
+echo "commit" >> $FILE
+echo "exit" >> $FILE
+
+fi
+
+echo "Done!!"
+
+echo -e "File completed, Out file = \e[36m~/$FILE\e[m"
+
+
+exit 0

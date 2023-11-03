@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+# Job Snijders <job@ntt.net>
+
+if [ "$1" == "source-as" ]; then
+    CMD="source-as"
+    ARG=$2
+elif [ "$1" == "transit-as" ]; then
+    CMD="transit-as"
+    ARG=$2
+elif [ "$1" == "ovs" ]; then
+    CMD="ovs"
+else
+    echo "Command should be one of transit-as, source-as, or ovs."
+    exit
+fi
+
+curl -s 'http://lg.instituut.net/cgi-bin/bgplg?cmd=show+ip+bgp+'"${CMD}"'&req='"${2}" | tail -n +53 | head -n  -7
+echo 'http://lg.instituut.net/cgi-bin/bgplg?cmd=show+ip+bgp+'"${CMD}"'&req='"${2}"

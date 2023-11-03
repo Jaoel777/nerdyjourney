@@ -1,0 +1,420 @@
+#!/opt/gums/bin/python3
+# -*- coding: utf-8 -*-
+
+### This script created for count circuits each telco.
+
+### NOTE ###
+#
+# ver1.0 31th Aug 2019 created by Wataru
+# ver1.1 6th Sep 2019 modify sql from ILIKE to LIKE. Added BT phase with de-dupe function. Wataru
+#
+############
+
+### Remain Task ###
+#
+############
+
+import psycopg2
+import sys
+import re
+import argparse
+import os
+from os.path import expanduser
+import logging
+
+class deco(object):
+	def clr(str, color):
+		BLACK = '\033[30m'
+		RED = '\033[31m'
+		GREEN = '\033[32m'
+		YELLOW = '\033[33m'
+		BLUE = '\033[34m'
+		PURPLE = '\033[35m'
+		CYAN = '\033[36m'
+		WHITE = '\033[37m'
+		END = '\033[0m'
+		BOLD = '\033[1m'
+		UNDERLINE = '\033[4m'
+		INVISIBLE = '\033[08m'
+		REVERCE = '\033[07m'
+
+		if color == "red":
+			deco_str = RED + str + END
+		elif color == "green":
+			deco_str = GREEN + str + END
+		elif color == "yellow":
+			deco_str = YELLOW + str + END
+		elif color == "blue":
+			deco_str = BLUE + str + END
+		elif color == "purple":
+			deco_str = PURPLE + str + END
+		elif color == "cyan":
+			deco_str = CYAN + str + END
+		elif color == "white":
+			deco_str = WHITE + str + END
+		elif color == "bold":
+			deco_str = BOLD + str + END
+		elif color == "under":
+			deco_str = UNDERLINE + str + END
+		elif color == "invisible":
+			deco_str = INVISIBLE + str + END
+		elif color == "reverce":
+			deco_str = REVERCE + str + END
+
+		return(deco_str)
+
+class CreateLog():
+	def __init__(self, cid_keyword, csv_flag):
+		self.msg= "Run script"
+		self.path= "/home/dpaxton/scripts/logs_script/cid_couter.log"
+
+		user= os.environ.get("USER")
+		if user != None: self.username= user
+		else: self.username= None
+
+		self.formatter= "%(asctime)s : {} : %(levelname)s : %(message)s : csv_flag= {} : input= {}"\
+				.format(self.username, csv_flag, cid_keyword)
+
+	def start(self):
+		logging.basicConfig(filename= self.path, level= logging.DEBUG, format= self.formatter)
+		logging.info("{}".format(self.msg))
+
+
+class argprs:
+	def __init__(self):
+		pass
+
+	def run_parse(self):
+		parser= argparse.ArgumentParser(description= "" , formatter_class=argparse.RawTextHelpFormatter)
+		parser.add_argument("cid_keyword") ### String
+		parser.add_argument("-c", "--csv", action= "store_true", help= "Output style will be created as csv") ### boolean
+
+		args= parser.parse_args()
+
+		return(args.cid_keyword, args.csv)
+
+
+class Database:
+	def __init__(self, cid_keyword, csv_flag):
+		### Regarding GetLoginInformation
+		self.current_path= os.getcwd()
+		self.home_path= expanduser("~") + "/.cloginrc"
+
+		### Relevant user input
+		self.cid_keyword= cid_keyword
+		self.csv_flag= csv_flag
+
+		### Regarding ConnectDatabase
+		self.user_name= ""
+		self.password= ""
+		self.host= "localhost"
+		self.db_name= "cfgtools"
+
+		### Regarding SQL commands
+		### This script use 'like' for limited requirments on purpose. Because Telco circuits supposed Upper case in cid field.
+		self.get_origin_cmd= "\
+SELECT device_name, ifc_name, ifc_descr_type, ifc_descr, abbr, cid \
+FROM ct_ifcs as if \
+JOIN ct_devices AS dev on if.device_id = dev.device_id \
+JOIN ct_ifcs_descr_type AS ifdst on ifdst.ifc_descr_type_id = if.ifc_descr_type_id \
+JOIN ct_vendor AS vendor on if.telco_id = vendor.vendor_id \
+WHERE abbr like '%{}%' \
+OR cid like '%{}%' \
+OR ifc_descr like '%{}%'"
+
+		### Regarding Master variable
+		self.master_list= []
+
+
+	def get_login_info(self):
+		with open(self.home_path, "r") as r:
+			for i in r.readlines():
+				if i.find("user") != -1: self.user_name= i.split(" ")[-1].strip()
+				elif i.find("password") != -1:
+					self.password= i.split(" ")[-1].strip()
+					if re.search("{|}", self.password) != None:
+						self.password= re.sub(r"[{}]", "", self.password)
+
+	
+	def db_login(self):
+		### Initialize DB connection
+		self.db_con= psycopg2.connect("dbname={} host={} user={} password={}".format(self.db_name, self.host, self.user_name, self.password))
+		self.db_cur= self.db_con.cursor()
+
+
+	def get_origin(self):
+		self.db_cur.execute(self.get_origin_cmd.format(self.cid_keyword, self.cid_keyword, self.cid_keyword))
+		rows= self.db_cur.fetchall() ### rows => (device_name, ifc_name, ifc_descr_type, idc_descr, abbr, cid)
+
+		for i in rows: ### Get taple from taple-in-list
+			templist= []
+			templist.append(i[0]) #[0] => device_name
+			templist.append(i[1]) #[1] => ifc_name
+			templist.append(i[2]) #[2] => description type
+			templist.append(i[3]) #[3] => description
+			templist.append("{} {}".format(i[4], i[5])) #[4] => abbr, [5] => cid.
+			self.master_list.append(templist)
+
+		self.db_cur.close()
+		self.db_con.close()
+		return(self.master_list)
+
+
+class Parse:
+	def __init__(self, master_list, cid_keyword):
+		self.master_list= master_list
+
+		### For count of description type
+		self.bc= 0
+		self.bb= 0
+		self.bd= 0
+		self.bp= 0
+		self.bt= 0
+		self.ot= 0
+		self.uk= 0
+
+		### For research
+		self.cid_keyword= cid_keyword
+		#self.search_keyword= re.compile(r"{}(\s+)(\S+)/|{}(\s+)(\S+)$|{}(\s+)(\S+)(\s+)".format(self.cid_keyword, self.cid_keyword, self.cid_keyword), re.IGNORECASE)
+		self.search_keyword= re.compile(r"{}(\s+)(\S+)/|{}(\s+)(\S+)$|{}(\s+)(\S+)(\s+)".format(self.cid_keyword, self.cid_keyword, self.cid_keyword), re.IGNORECASE)
+			### NOTE: re.IGNORECASE is no match either Large-ex or Small-ex.
+
+		### For Checked column list
+		self.checked_BB= []
+		self.checked_BC= []
+		self.checked_BD= []
+		self.checked_BP= []
+		self.checked_BT= []
+		self.checked_other= []
+		self.checked_unknown= []
+
+	def run(self):
+		#print("All circuits: {}".format(len(self.master_list)))
+
+		for column in self.master_list:
+			### Reject no cid found and count as unknown
+			if re.search(self.search_keyword, column[4]) == None:
+				self.uk+=1
+				self.checked_unknown.append(column)
+				continue
+
+			### Count what using for
+			elif column[2] == "BC":
+				### Count and appnd
+				self.bc+=1
+				self.checked_BC.append(column)
+
+				### Get cid and append
+				searched_cid= re.search(self.search_keyword, column[4]).group().split(" ", 1)[-1].strip("/")
+				column.append(searched_cid)
+
+				continue
+
+			elif column[2] == "BD":
+				### Count and append
+				self.bd+=1
+				self.checked_BD.append(column)
+
+				### Get cid and append
+				searched_cid= re.search(self.search_keyword, column[4]).group().split(" ", 1)[-1].strip("/")
+				column.append(searched_cid)
+
+				continue
+
+			elif column[2] == "BP":
+				### Count and append
+				self.bp+=1
+				self.checked_BP.append(column)
+
+				### Get cid and append
+				searched_cid= re.search(self.search_keyword, column[4]).group().split(" ", 1)[-1].strip("/")
+				column.append(searched_cid)
+
+				continue
+
+			elif column[2] == "BT":
+				### Count and append
+				self.bt+=1
+				self.checked_BT.append(column)
+
+				### Zero clear
+				searched_cid= ""
+				cnt= 0
+
+				### Get cid and append
+				searched_cid= re.search(self.search_keyword, column[4]).group().split(" ", 1)[-1].strip("/")
+				column.append(searched_cid)
+
+				### de-duplicating
+				for i,check in enumerate(self.master_list):
+					if check[4].find(searched_cid) != -1:
+						cnt+=1
+						if cnt == 2:
+							self.master_list.pop(i) # remove from list
+							break
+
+
+			elif column[2] == "BB":
+				### Count and append
+				self.bb+=1
+				self.checked_BB.append(column)
+
+				### Zero clear
+				searched_cid= ""
+				cnt= 0
+
+				### Get cid and append
+				searched_cid= re.search(self.search_keyword, column[4]).group().split(" ", 1)[-1].strip("/")
+				column.append(searched_cid)
+
+				### i is beggining from 0.
+				### Using enumerate because wants to remove column using list number when found the same cid as other side.
+				for i,check in enumerate(self.master_list):
+					if check[4].find(searched_cid) != -1:
+						cnt+=1
+						if cnt == 2: ### when the cid found in 2 times, remove the columun using pop
+							self.master_list.pop(i)
+							break
+			else:
+				### Count as others and append
+				self.ot+=1
+				searched_cid= re.search(self.search_keyword, column[4]).group().split(" ", 1)[-1].strip("/")
+				column.append(searched_cid)
+				self.checked_other.append(column)
+				continue
+
+
+	def monitor(self):
+		
+		print(deco.clr("\nTotal: {}  (This is including BB, BC, BD, BP, BT and Others. BB/BT is de-duped)"\
+			.format(self.bb + self.bc + self.bd + self.bp + self.bt + self.ot), "red"))
+
+		self.found_cid(self.checked_BB, "BB", self.bb)
+		self.found_cid(self.checked_BC, "BC", self.bc)
+		self.found_cid(self.checked_BD, "BD", self.bd)
+		self.found_cid(self.checked_BP, "BP", self.bp)
+		self.found_cid(self.checked_BT, "BT", self.bt)
+		self.found_cid(self.checked_other, "Others", self.ot)
+		#self.found_cid(self.checked_unknown, "No cid found", self.uk)
+
+
+	def set_len(self):
+		self.len_router= 6
+		self.len_ifc= 9
+		self.len_type= 4
+		self.len_desc= 11
+		self.len_wholecid= 12
+		self.len_spcid= 12
+
+
+	def found_cid(self, found_list, ifctype, count):
+		### set variable refelence length
+		self.set_len()
+
+		### This loop is list of cid found.(existing 6 value in list)
+		for col in found_list:
+			if len(col[0]) > self.len_router: self.len_router= len(col[0])
+			if len(col[1]) > self.len_ifc: self.len_ifc= len(col[1])
+			if len(col[2]) > self.len_type: self.len_type= len(col[2])
+			if len(col[3]) > self.len_desc: self.len_desc= len(col[3])
+			if len(col[4]) > self.len_wholecid: self.len_wholecid= len(col[4])
+			if ifctype != "No cid found":
+				if len(col[5]) > self.len_spcid: self.len_spcid= len(col[5])
+
+		if ifctype != "BB" or ifctype != "BT": print(deco.clr("\n<< {} >>  Count: {}".format(ifctype, count), "cyan"))
+		else: print(deco.clr("\n<< {} >>  Count: {} (This count is de-duped. Only one side.)".format(ifctype, count), "cyan"))
+
+		#print(self.len_router)
+		#print(self.len_ifc)
+		#print(self.len_type)
+		#print(self.len_desc)
+		#print(self.len_wholecid)
+		#print(self.len_spcid)
+
+		if ifctype != "No cid found":
+			print("Router" + " " * (self.len_router - 6) + " | " +\
+				"Interface" + " " * (self.len_ifc - 9) + " | " +\
+				"type" + " " * (self.len_type - 4) + " | " +\
+				"description" + " " * (self.len_desc - 11) + " | " +\
+				"whole of cid" + " " * (self.len_wholecid - 12) + " | " +\
+				"specific cid")
+
+		else:
+			print("Router" + " " * (self.len_router - 6) + " | " +\
+				"Interface" + " " * (self.len_ifc - 9) + " | " +\
+				"type" + " " * (self.len_type - 4) + " | " +\
+				"description" + " " * (self.len_desc - 11) + " | " +\
+				"whole of cid" + " " * (self.len_wholecid - 12)) 
+
+
+		if ifctype != "No cid found":
+			print("-" * self.len_router + "-+-" +\
+				"-" * self.len_ifc + "-+-" +\
+				"-" * self.len_type + "-+-" +\
+				"-" * self.len_desc + "-+-" +\
+				"-" * self.len_wholecid + "-+-" +\
+				"-" * self.len_spcid + "--")
+		else:
+			print("-" * self.len_router + "-+-" +\
+				"-" * self.len_ifc + "-+-" +\
+				"-" * self.len_type + "-+-" +\
+				"-" * self.len_desc + "-+-" +\
+				"-" * self.len_wholecid + "--")
+
+
+		for col in found_list:
+			if ifctype != "No cid found":
+				print(col[0] + " " * (self.len_router - len(col[0])) + " | " +\
+					col[1] + " " * (self.len_ifc - len(col[1])) + " | " +\
+					col[2] + " " * (self.len_type - len(col[2])) + " | " +\
+					col[3] + " " * (self.len_desc - len(col[3])) + " | " +\
+					col[4] + " " * (self.len_wholecid - len(col[4])) + " | " +\
+					col[5] + " " * (self.len_spcid - len(col[5])))
+			else:
+				print(col[0] + " " * (self.len_router - len(col[0])) + " | " +\
+					col[1] + " " * (self.len_ifc - len(col[1])) + " | " +\
+					col[2] + " " * (self.len_type - len(col[2])) + " | " +\
+					col[3] + " " * (self.len_desc - len(col[3])) + " | " +\
+					col[4] + " " * (self.len_wholecid - len(col[4]))) 
+
+
+	def monitor_csv(self):
+		print(deco.clr("\nTotal: {}  (This is including BB(de-dupe), BC, BD, BP, BT(de-duped) and Others.)"\
+			.format(self.bb + self.bc + self.bd + self.bp + self.bt + self.ot), "red"))
+		print(deco.clr("BB: {}(de-duped), BC: {}, BD: {}, BP: {}, BT: {}(de-duped), Others: {}\n"\
+			.format(self.bb, self.bc, self.bd, self.bp, self.bt, self.ot), "cyan"))
+
+		for i in self.checked_BB: print("\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"".format(i[0],i[1],i[2],i[3],i[4],i[5]))
+		for i in self.checked_BC: print("\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"".format(i[0],i[1],i[2],i[3],i[4],i[5]))
+		for i in self.checked_BD: print("\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"".format(i[0],i[1],i[2],i[3],i[4],i[5]))
+		for i in self.checked_BP: print("\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"".format(i[0],i[1],i[2],i[3],i[4],i[5]))
+		for i in self.checked_BT: print("\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"".format(i[0],i[1],i[2],i[3],i[4],i[5]))
+		for i in self.checked_other: print("\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"".format(i[0],i[1],i[2],i[3],i[4],i[5]))
+
+		#print(deco.clr("\nFollowing circuits are no found specific cid as \"{}\".\nCount: {}\n".format(self.cid_keyword, self.uk), "cyan"))
+		#for i in self.checked_unknown: print("\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"".format(i[0],i[1],i[2],i[3],i[4]))
+
+
+
+def main():
+	ap= argprs()
+	cid_keyword, csv_flag= ap.run_parse()
+
+	logs= CreateLog(cid_keyword, csv_flag)
+	logs.start()
+
+	db= Database(cid_keyword, csv_flag)
+	db.get_login_info()
+	db.db_login()
+	master_list= db.get_origin()
+
+	ps= Parse(master_list, cid_keyword)
+	ps.run()
+
+	if csv_flag == True: ps.monitor_csv()
+	else: ps.monitor()
+
+	print(" ")
+
+if __name__ == '__main__':
+	main()

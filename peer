@@ -1,0 +1,461 @@
+#!/bin/bash 
+if [ $# -lt 1 ]
+then
+echo
+echo "Usage: peer [IPv4/v6 address]"
+echo "----------"
+echo "you will see the following results"
+echo " Configuration on eng0"
+echo " Interface and BGP peer status and power level on router"
+echo " Interface and BGP logs on router"
+echo "or Usage: peer usid ipv4/ipv6 [usid]"
+echo
+exit
+fi
+
+log_length="10"
+peer_info=$1
+
+if [[ $1 = "usid" ]];then
+echo usid mode
+ if [[ $2 = "ipv4" ]];then
+  echo ipv4
+  pipp=(`psql -d cfgtools -c "select peers.ip_addr as peer_IP from peers, routers, interfaces where interfaces.cust_id = '$3' and peers.router = routers.name and peers.router = interfaces.router and interfaces.ifc_name = peers.multihop_src order by peertype,description" | egrep -o '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'`)
+  peer_info=$pipp
+  echo $pipp
+ elif [[ $2 = "ipv6" ]];then
+  echo ipv6
+  pipp=(`psql -d cfgtools -c "select peers.ip_addr as peer_IP from peers, routers, interfaces where interfaces.cust_id = '$3' and peers.router = routers.name and peers.router = interfaces.router and interfaces.ifc_name = peers.multihop_src order by peertype,description" | egrep -o '((([0-9A-Fa-f]{1,4}:){7}([0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]{1,4}:){6}(:[0-9A-Fa-f]{1,4}|((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4}){1,2})|:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){1,3})|((:[0-9A-Fa-f]{1,4})?:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){1,4})|((:[0-9A-Fa-f]{1,4}){0,2}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){1,5})|((:[0-9A-Fa-f]{1,4}){0,3}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){1,6})|((:[0-9A-Fa-f]{1,4}){0,4}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(:(((:[0-9A-Fa-f]{1,4}){1,7})|((:[0-9A-Fa-f]{1,4}){0,5}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:)))(%.+)?'`)
+  peer_info=$pipp
+  echo $pipp
+ fi
+fi
+
+if [[ $1 =~ -t ]];then
+echo test mode
+ testmode="true"
+ peer_info=$2
+fi
+
+
+if [[ $1 =~ l ]];then
+if [[ $2 =~ [0-9,:] ]];then
+clog ROUTING-BGP-5-ADJCHANGE today | grep $2
+jlog RPD_BGP_NEIGHBOR_STATE_CHANGED today | grep $2
+exit
+fi
+
+clog ROUTING-BGP-5-ADJCHANGE today | tail
+jlog RPD_BGP_NEIGHBOR_STATE_CHANGED today | tail
+exit
+fi
+
+por=()
+IFS=$"!"
+por=(`psql -d cfgtools -c "select peers.asn, peers.ip_addr as peer_IP, peers.router, peers.multihop_src as interface, peers.description, peers.peertype, peers.state, routers.mfg, interfaces.cust_id as usid , platform from peers, routers, interfaces where peers.ip_addr = '$peer_info' and peers.router = routers.name and peers.router = interfaces.router and interfaces.ifc_name = peers.multihop_src order by peertype,description" | sed 1,2d | sed 1,1\!d | sed -e 's/|/!/g'|sed -e 's/ //gi'`)
+decr=`psql -c " select name from interfaces where router ilike '${por[2]}' and ifc_name ilike '${por[3]}' " cfgtools| sed -n 3,3p | sed -e 's/^ //g'`
+#matsu added por 9 as platform 170428
+#echo ${por[9]}
+
+
+if [[ $2 =~ m ]];then
+echo
+echo '-----------------------------'
+echo
+echo Hello,
+echo
+echo "We are NTT communications, AS 2914."
+echo "We have detected BGP peer down."
+echo ""
+echo "Is this related to maintenance on your side?"
+echo ""
+echo "Your Service ID : ${por[8]}"
+echo "Your IP : ${por[1]}"
+echo
+echo '-----------------------------'
+echo
+exit
+fi
+
+
+echo [Config]
+#psql -d cfgtools -c "select peers.asn, peers.ip_addr as peer_IP, peers.router, peers.multihop_src as interface, peers.description, peers.peertype, peers.state, interfaces.cust_id as usid from peers, routers, interfaces where peers.ip_addr = '$peer_info' and peers.router = routers.name and peers.router = interfaces.router and interfaces.ifc_name = peers.multihop_src order by peertype,description"
+
+psql -d cfgtools -c "select p.asn, p.ip_addr as peer_IP, p.router, p.multihop_src as interface, p.description, p.peertype, p.state, i.cust_id as usid ,i.state as interface_state from peers p JOIN interfaces i  on (p.router = i.router and p.multihop_src = i.ifc_name)  where p.ip_addr = '$peer_info' order by peertype,description"
+
+hiduke=`date  '+%m/%d'`
+
+#Customer Ticket Subject Line Formatting
+if [[ ${por[5]} =~ customer ]];then
+#Variables 2=Router     3=Port  4=Name  0=ASN   1=IP    
+echo "BC: ${por[4]} (AS${por[0]}) - ${por[2]} ${por[3]} - ${por[1]} - BGP down"| sed -e 's/bundle-ether/BE/g'| sed -e 's/tengige/te/g'| sed -e 's/gigabitethernet/gi/g'
+echo "$hiduke - AWAITING CUSTOMER"
+else
+#Peer Ticket Subject Line Formatting
+echo "BP: ${por[4]} (AS${por[0]}) - ${por[2]} ${por[3]} - ${por[1]} - BGP down"| sed -e 's/bundle-ether/BE/g'| sed -e 's/tengige/te/g'| sed -e 's/gigabitethernet/gi/g'
+echo "$hiduke - AWAITING PEER"
+fi
+echo
+echo Gathering information from ${por[2]}. 
+echo It takes about 10sec.
+
+#declare $interface as "interface name withouht prefix", e.g. "interface = 0/0/0"
+interface=`echo ${por[3]} | sed 's/[a-z].*[a-z]//'`
+#DEclare $interface_log as "interfacename without prefix", e.g. 'interface = 0/0/0'
+interface_log=`echo ${por[3]} | sed 's/[a-z].*[a-z]//'`
+echo ${por[7]}
+echo ${por[9]}
+#-------------------------------------------------#
+#              for CISCO(ASR) routers
+#-------------------------------------------------#
+if [ ${por[7]} = "cisco" ];then
+
+ if [[ ${por[3]} =~ bundle* ]];then
+ #If the ciruit is bundle. declare "$interface" as "addifcBE$interface_number", e.g. "interface = addifcBE1"
+ #and ready for grep from log for "Bundle-Ether""$interface_number"", e.g. "interface_log = Bundle-Ether1"
+  interface_number=`echo ${por[3]} | sed 's/[a-z].*[a-z]//'`
+  interface=`echo "addifcBE$interface_number "`
+  interface_log="Bundle-Ether""$interface_number" 
+ fi
+ 
+ if [[ ${por[3]} =~ loopback* ]];then
+ #If the circuit is loopback, declare "$interface" as "Lo$interface_number", e.g. "interface = Lo1"
+ #and ready for grep from log for "loopback$interface_number", e.g. "interface_log = loopback1"
+  interface_number=`echo ${por[3]} | sed 's/[a-z].*[a-z]//'`
+  interface=`echo "Lo$interface_number"`
+  interface_log="loopback$interface_number"
+ fi
+ log='"'"$interface_log""| ""${por[1]}"'"'
+
+
+ if [[ $interface =~ 10[0-9]/ || ${por[3]} =~ bundle* || ${por[3]} =~ loopback* ]];then
+ #
+ #If circuit is bundle,loopback,satellite-------------------------------------
+ #
+  if [[ ${por[1]} =~ [.] ]];then
+   #Create command which is IPv4 peer, bundle or loopback.
+   command="show interfaces description ; show bgp summary; show logging | inc $log "
+  else
+   #Create command which is IPv6 peer, bundle or loopback.
+   command="show interfaces description ; show bgp ipv6 unicast summary | begin ${por[1]}; show logging | inc $log "
+  fi
+
+  #----------------get bundle interface id------------------------
+  ifc_id=`psql -c " select ct_ifcs.ifc_id from ct_ifcs, ct_devices where ct_ifcs.ifc_name ilike '${por[3]}' and ct_devices.device_name ilike '${por[2]}' and ct_ifcs.device_id = ct_devices.device_id" cfgtools | sed -n 3,3p | sed -e 's/ //g'`
+  #----------------get interfaces name included in bundle---------
+  psql -c " select ct_ifcs.ifc_name from ct_proto_proto_agg, ct_ifcs where ct_proto_proto_agg.agg_ifc_id = '$ifc_id'  and ct_ifcs.ifc_id = ct_proto_proto_agg.ifc_id and ct_ifcs.ifc_id <> '$ifc_id'" cfgtools | sed 1,2d | sed \$d |sed \$d > result
+  #----------------get usids included in bundle-------------------
+
+
+  #psql -c " select ct_ifcs.ifc_name from ct_proto_proto_agg, ct_ifcs where ct_proto_proto_agg.agg_ifc_id = '$ifc_id'  and ct_ifcs.ifc_id = ct_proto_proto_agg.ifc_id and ct_ifcs.ifc_id <> '$ifc_id'" cfgtools | sed 1,2d | sed \$d |sed \$d > result2
+  psql -c " select ct_ifcs.ifc_name from ct_proto_proto_agg, ct_ifcs where ct_proto_proto_agg.agg_ifc_id = '$ifc_id'  and ct_ifcs.ifc_id = ct_proto_proto_agg.ifc_id and ct_ifcs.ifc_id <> '$ifc_id'" cfgtools | sed 1,2d | sed \$d |sed \$d | sed -e 's/tengige/Te/g'| sed -e 's/gigabitethernet/Gi/g' |sed 's/ //g'>result2
+
+ 
+  #----------------add power level commands of bundle and grep interface name for bundle----
+  countc=`cat result | wc -l`
+  i=1
+  arrey=()
+  while [ $i -le $countc ];do
+   #-----interface_agg=interface name in bundle, interface_agg2=usid in bundle
+   interface_agg=`cat result | sed -n $i,${i}p`
+   interface_agg2=`cat result2 | sed -n $i,${i}p`
+#comment out temporary by matsu Oct/13/16
+#m   if [[ $interface_agg =~ 10[0-9] || ${por[3]} =~ loopback* ]];then
+#m    echo satellite powerlevel will be not shown
+#m   
+#m   else
+    IFS=$","
+    let i=i+1
+    #-------powerlevel part
+     cmd="; show controllers $interface_agg phy | inc x P"
+    #cmd=" ; show controllers $interface_agg phy "
+    command=`echo $command | sed -e "s,$,$cmd,g"`
+    #-------description part
+   # inf_number=`echo $interface_agg2 | sed 's/[a-z].*[a-z]//'| sed -e 's, ,,g'`
+   # interface=`echo $interface | sed -e "s,addifc,${inf_number}\\\\\|addifc,g"`
+   interface=`echo $interface | sed -e "s,addifc,${interface_agg2}\\\\\|addifc,g"`   
+#m   fi
+  done
+
+  interface=`echo $interface | sed -e "s,addifc,,g"`
+ 
+ else
+ #
+ #If circuit is NOT bundle,loopback,satellite-------------------------------------
+ #
+  if [[ ${por[1]} =~ [.] ]];then
+   #Create command which is IPv4 peer, neither bundle nor loopback.
+   command="show controllers ${por[3]} phy | inc x P; show interfaces description ; show bgp summary  ; show logging | inc $log "
+  else
+  #Create command which is IPv6 peer, neither bundle nor loopback.
+  command="show controllers ${por[3]} phy | inc x P; show interfaces description ;show bgp ipv6 unicast summary | begin ${por[1]}; show logging start today | inc $log "
+  fi
+ fi
+
+
+ #test mode which does not login
+  if [[ $1 =~ -te ]];then
+  echo notlogging in test mode
+  echo ${por[7]}
+  echo command="$command"
+  echo interface=$interface
+  echo desc=$decr
+  echo result=
+  cat result
+  echo
+  echo result2=
+  cat result2
+ exit
+ fi
+ #test mode which login to router
+ if [[ $testmode =~ "true" ]]; then
+  echo "test activate"
+  clogin -c "$command" ${por[2]}
+  echo [GREPPED contents]
+  echo grep grep "$interface\|Interface"
+  echo grep "${por[1]}\|Neighbor"
+  echo grep $interface_log
+  echo grep ${por[1]}
+ exit
+ fi 
+
+
+ if [[ $2 =~ "q" ]]; then
+ command="show bgp summary | inc ${por[1]}"
+clogin -c "$command" ${por[2]} 
+fi
+
+ #
+ #Login to  Cisco router and perform all commands.
+ #
+result=`clogin -c "$command" ${por[2]}`
+ #
+ #
+ 
+ #----------showing results----------------------------------------------------------------------------
+ echo
+ echo [Interface status]
+ echo $result | grep "$interface\|Protocol" |grep "$decr\|Protocol"| grep -v "show" | grep -v LC | grep -v RP
+ echo
+ echo [BGP status]
+ if [[ ${por[1]} =~ [.] ]];then
+  #show result of IPv4 peer
+  echo $result | grep "${por[1]} \|Neighbor" | grep -v "RP/" |grep -v "show" 
+ else 
+  #show result of IPv6 peer
+  echo $result |  grep -v RP/ | grep -1 ${por[1]} | grep -v "show"
+ fi
+ 
+ echo
+ echo [Power level]
+#echo $result |grep "x P"  | sed -e 's/.*controllers //g' | sed -e 's/phy.*//g' 
+echo $result |grep "controller\|x P"  | sed -e 's/.*controllers //g' | sed -e 's/phy.*//g'
+# echo $result | grep "PHY data\|x P" | sed -e 's/.*: //g' | sed -e 's/phy.*//g' 
+ echo
+ echo [Logs for Interface]
+ log_count=`echo $result | grep $interface_log | grep -v "show" | grep "LC\|RP" | wc -l`
+ if [ $log_count -gt 15 ];then
+  echo log count is $log_count. Do you want to show them all? [yes/no]
+  echo log count is $log_count. 
+ # read response
+  if [[ $response =~ y ]];then
+   echo
+   echo $result | grep $interface_log | grep -v "show"|grep "LC\|RP"
+  else
+   count=`expr $log_count - $log_length + 1`
+   #echo showing last $log_length logs
+   echo $result | grep $interface_log | grep -v "show" |grep "LC\|RP" | sed -n -e $count,$log_count'p'
+  fi
+ else
+  echo $result | grep $interface_log | grep -v "show" |grep "LC\|RP"
+ fi
+ 
+ 
+ echo
+ echo [Logs for BGP]
+ log_count=`echo $result | grep ${por[1]} | grep -v "show" | sed 1,1d  | wc -l`
+ if [ $log_count -gt 15 ];then
+  echo Log count is $log_count. 
+  #read response
+  if [[ $response =~ y ]];then
+echo $result | grep ${por[1]} | grep -v "show" | grep "LC\|RP"
+#   echo $result | grep ${por[1]} | grep -v "show" | sed 1,1d 
+  else
+   count=`expr $log_count - $log_length + 1`
+   #echo showing last $log_length logs...
+echo $result | grep ${por[1]} | grep -v "show" | grep "LC\|RP" | sed -n -e $count,$log_count'p'
+#   echo $result | grep ${por[1]} | grep -v "show" | sed 1,1d | sed -n -e $count,$log_count'p'
+  fi
+ else 
+echo $result | grep ${por[1]} | grep -v "show" | grep "LC\|RP"
+#  echo $result | grep ${por[1]} | grep -v "show" | sed 1,1d 
+ fi
+fi
+echo 
+  rm -f result
+  rm -f result2 
+
+#-------------------------------------------------#
+#              for JUNIPER routers
+#-------------------------------------------------#
+ 
+if [ ${por[7]} = "juniper" ];then
+  
+ interface=`echo ${por[3]} | sed 's/[a-z].*-//'`
+ interface_log=`echo ${por[3]} | sed 's/[a-z].*-//'`
+  #Check if the ciruit is bundle.
+ if [[ ${por[3]} =~ ae* ]];then
+  interface_number=`echo ${por[3]} | sed 's/[a-z].*[a-z]//'`
+  interface=`echo "${por[3]}\|ae$interface_number\|addifc"`
+  interface_log="ae""$interface_number"
+ fi
+ #Check if the circuit is loopback.
+ if [[ ${por[3]} =~ lo* ]];then
+  interface_number=`echo ${por[3]} | sed 's/[a-z].*[a-z]//'`
+  interface=`echo "lo$interface_number"`
+  interface_log="lo$interface_number"
+ fi
+
+#matsu ptx modifing
+ if [[ ${por[9]} =~ ptx ]];then
+  command="show interfaces descriptions ; show bgp summary ; show interfaces diagnostics optics ${por[3]} | except Module | except threshold | except alarm | except warning; show log messages | match $log "
+ else
+  command="show interfaces descriptions ; show bgp summary ; show interfaces diagnostics optics ${por[3]} | match "'"output|receive|rx|Physical"'" |except alarm|except warning; show log messages | match $log "
+ fi
+
+ if [[ ${por[3]} =~ ae* ]];then
+  #----------------get bundle interface id------------------------
+  ifc_id=`psql -c " select ct_ifcs.ifc_id from ct_ifcs, ct_devices where ct_ifcs.ifc_name ilike '${por[3]}' and ct_devices.device_name ilike '${por[2]}' and ct_ifcs.device_id = ct_devices.device_id" cfgtools | sed -n 3,3p | sed -e 's/ //g'`
+  #----------------get interfaces name included in bundle---------
+  psql -c " select ct_ifcs.ifc_name from ct_proto_proto_agg, ct_ifcs where ct_proto_proto_agg.agg_ifc_id = '$ifc_id'  and ct_ifcs.ifc_id = ct_proto_proto_agg.ifc_id " cfgtools | sed 1,2d | sed \$d |sed \$d >result
+  #----------------get usids included in bundle-------------------
+  psql -c " select ct_ifcs.ifc_name from ct_proto_proto_agg, ct_ifcs where ct_proto_proto_agg.agg_ifc_id = '$ifc_id'  and ct_ifcs.ifc_id = ct_proto_proto_agg.ifc_id " cfgtools | sed 1,2d | sed \$d |sed \$d >result2
+
+  #----------------add power level commands of bundle and grep interface name for bundle----
+  countc=`cat result | wc -l`
+  i=1
+  arrey=()
+  while [ $i -le $countc ];do
+   #-----interface_agg=interface name in bundle, interface_agg2=usid in bundle
+   interface_agg=`cat result | sed -n $i,${i}p`
+   interface_agg2=`cat result2 | sed -n $i,${i}p`
+   IFS=$","
+   let i=i+1
+   #-------powerlevel part
+   cmd=" ; show interfaces diagnostics optics $interface_agg"
+   command=`echo $command | sed -e "s,$,$cmd,g"`
+   #-------description part
+   inf_number=`echo $interface_agg2 | sed 's/[a-z].*[a-z]//'| sed -e 's, ,,g'`
+   interface=`echo $interface | sed -e "s,addifc,${inf_number}\\\\\|addifc,g"`
+  done
+ fi
+
+
+ log='"'"$interface_log""| ""${por[1]}"'"'
+ 
+ if [[ $1 =~ -te ]];then
+  echo not logging in test mode
+  echo $command
+  exit
+ fi
+ 
+ 
+ if [[ $testmode =~ "true" ]]; then
+  echo "test activate"
+  jlogin -c "$command" ${por[2]}
+  echo [GREPPED contents]
+  echo grep grep "$interface\|Interface"
+  echo grep "${por[1]}\|Neighbor"
+  echo grep $interface_log
+  echo grep ${por[1]}
+  exit
+ fi
+
+#matsu ptx stuff
+if [[ ${por[9]} =~ ptx ]];then
+ prompt_grep="bb>"
+else
+ prompt_grep="bb-re"
+fi
+
+ result=`jlogin -c "$command" ${por[2]}`
+ echo
+ echo [Interface Status]
+ echo ${por[2]}
+ echo $result | grep "$interface\|Description" |grep $decr| grep -v "show" | grep -v $prompt_grep
+ 
+ echo
+ echo [BGP status]
+ if [[ ${por[9]} =~ ptx ]];then 
+  echo $result | grep  "${por[1]}\|Table" | grep -v "show" | grep -v $prompt_grep | grep -v "]:"
+ else
+  echo $result | grep  "${por[1]}\|Table" | grep -v "show" | grep -v $prompt_grep
+ fi
+
+ echo 
+ echo [Power level]
+
+#matsu ptx stuff
+ if [[ ${por[9]} =~ ptx ]];then
+  echo $result | grep "dBm" | grep -v "alarm" | grep -v "warning" | grep -v "Peer"| grep -v "show" | grep -v $prompt_grep
+ else
+  echo $result | grep "output\|Receive\|rx\|Physical" | grep -v "alarm" | grep -v "warning" | grep -v "Peer"| grep -v "show" | grep -v $prompt_grep
+ fi
+
+ echo
+ echo [Logs for Interface]
+ if [[ ${por[9]} =~ ptx ]];then
+  log_count=`echo $result | grep $interface_log | grep -v "show" |grep "]:" | wc -l`
+ else
+  log_count=`echo $result | grep $interface_log | grep -v "show" |grep $prompt_grep | wc -l`
+ fi
+ if [ $log_count -gt 15 ];then
+  #echo log count is $log_count. Do you want to show them all? [yes/no]
+  echo log count is $log_count. 
+ # read response
+  if [[ $response =~ y ]];then
+   echo
+#ughh, who made this? too pain. no longer support -y on ptx :P
+   echo $result | grep $interface_log | grep -v "show" |grep $prompt_grep
+  else
+   count=`expr $log_count - $log_length + 1`
+   #echo showing last $log_length logs
+   if [[ ${por[9]} =~ ptx ]];then
+    echo $result | grep $interface_log | grep -v "show" | grep "]:" | sed -n -e $count,$log_count'p'
+   else
+    echo $result | grep $interface_log | grep -v "show" |grep $prompt_grep | sed -n -e $count,$log_count'p'
+   fi
+  fi
+ else
+  echo $result | grep $interface_log | grep -v "show" |grep $prompt_grep
+ fi
+ 
+ echo
+ echo [Logs for BGP]
+ if [[ ${por[9]} =~ ptx ]];then
+  log_count=`echo $result | grep ${por[1]} | grep -v "show" |  grep "]:" | sed 1,1d | wc -l`
+ else
+  log_count=`echo $result | grep ${por[1]} | grep -v "show" |  grep $prompt_grep | sed 1,1d | wc -l`
+ fi
+ if [ $log_count -gt 15 ];then
+  #echo Log count is $log_count. Do you want to show them all? [yes/no]
+  echo Log count is $log_count. 
+  #read response
+  if [[ $response =~ y ]];then
+# as well.
+   echo $result | grep ${por[1]} | grep -v "show" | grep $prompt_grep
+  else
+   count=`expr $log_count - $log_length + 1`
+   #echo showing last $log_length logs...
+   if [[ ${por[9]} =~ ptx ]];then
+    echo $result | grep ${por[1]} | grep -v "show" |grep "]:" | sed -n -e $count,$log_count'p'
+   else
+    echo $result | grep ${por[1]} | grep -v "show" |grep $prompt_grep | sed -n -e $count,$log_count'p'
+   fi
+
+  fi
+ else 
+ echo $result | grep ${por[1]} | grep -v "show" | grep $prompt_grep
+ fi
+echo
+fi
